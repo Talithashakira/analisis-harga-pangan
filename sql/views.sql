@@ -5,6 +5,7 @@
 -- =====================================================================
 
 DROP VIEW IF EXISTS
+    v_matriks_risiko,
     v_efek_lebaran,
     v_kenaikan_lebaran,
     v_volatilitas,
@@ -162,3 +163,17 @@ SELECT
     ROUND(((harga_rata / FIRST_VALUE(harga_rata) OVER w - 1) * 100)::numeric, 1) AS vs_2022_pct
 FROM tahunan
 WINDOW w AS (PARTITION BY komoditas ORDER BY tahun);
+
+-- ---------------------------------------------------------------------
+-- 8. Matriks risiko: satu baris per komoditas (visual utama dashboard)
+-- ---------------------------------------------------------------------
+CREATE VIEW v_matriks_risiko AS
+SELECT
+    v.komoditas,
+    v.rata_gejolak_bulanan_pct,
+    t.vs_2022_pct   AS kenaikan_2022_2025_pct,
+    e.median_pct    AS efek_lebaran_median_pct,
+    e.tahun_naik    AS lebaran_tahun_naik
+FROM v_volatilitas v
+JOIN v_tren_tahunan t ON t.komoditas = v.komoditas AND t.tahun = 2025
+JOIN v_efek_lebaran e ON e.komoditas = v.komoditas;
