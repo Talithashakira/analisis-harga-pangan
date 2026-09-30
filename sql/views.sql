@@ -5,6 +5,9 @@
 -- =====================================================================
 
 DROP VIEW IF EXISTS
+    dim_komoditas,
+    dim_provinsi,
+    dim_tahun,
     v_matriks_risiko,
     v_efek_lebaran,
     v_kenaikan_lebaran,
@@ -103,16 +106,17 @@ CREATE VIEW v_indeks_provinsi AS
 WITH nasional_harian AS (
     SELECT komoditas, tanggal, AVG(harga) AS harga_nasional
     FROM harga_pangan
-    WHERE tanggal BETWEEN '2025-01-01' AND '2025-12-31'
+    WHERE tanggal < '2026-01-01'
     GROUP BY komoditas, tanggal
 )
 SELECT
     h.provinsi,
     h.komoditas,
-    AVG(h.harga / n.harga_nasional * 100) AS indeks
+    EXTRACT(YEAR FROM h.tanggal)::int      AS tahun,
+    AVG(h.harga / n.harga_nasional * 100)  AS indeks
 FROM harga_pangan h
 JOIN nasional_harian n USING (komoditas, tanggal)
-GROUP BY h.provinsi, h.komoditas;
+GROUP BY h.provinsi, h.komoditas, EXTRACT(YEAR FROM h.tanggal);
 
 
 -- ---------------------------------------------------------------------
@@ -120,25 +124,30 @@ GROUP BY h.provinsi, h.komoditas;
 -- ---------------------------------------------------------------------
 CREATE VIEW v_sourcing_jawa AS
 WITH jawa AS (
-    SELECT komoditas, provinsi, AVG(harga) AS harga_rata
+    SELECT
+        komoditas,
+        provinsi,
+        EXTRACT(YEAR FROM tanggal)::int AS tahun,
+        AVG(harga)                      AS harga_rata
     FROM harga_pangan
-    WHERE tanggal BETWEEN '2025-01-01' AND '2025-12-31'
+    WHERE tanggal < '2026-01-01'
       AND provinsi IN ('DKI Jakarta', 'Banten', 'Jawa Barat',
                        'Jawa Tengah', 'DI Yogyakarta', 'Jawa Timur')
-    GROUP BY komoditas, provinsi
+    GROUP BY komoditas, provinsi, EXTRACT(YEAR FROM tanggal)
 ),
 dengan_jakarta AS (
     SELECT
         *,
         MAX(harga_rata) FILTER (WHERE provinsi = 'DKI Jakarta')
-            OVER (PARTITION BY komoditas) AS harga_jakarta
+            OVER (PARTITION BY komoditas, tahun) AS harga_jakarta
     FROM jawa
 )
 SELECT
     komoditas,
     provinsi,
-    ROUND(harga_rata::numeric, 0)                               AS harga_rata,
-    ROUND(((harga_rata / harga_jakarta - 1) * 100)::numeric, 1) AS selisih_vs_jakarta_pct
+    tahun,
+    harga_rata,
+    (harga_rata / harga_jakarta - 1) * 100 AS selisih_vs_jakarta_pct
 FROM dengan_jakarta;
 
 
@@ -173,7 +182,48 @@ SELECT
     v.rata_gejolak_bulanan_pct,
     t.vs_2022_pct   AS kenaikan_2022_2025_pct,
     e.median_pct    AS efek_lebaran_median_pct,
-    e.tahun_naik    AS lebaran_tahun_naik
+    e.tahun_naik    AS lebaran_tahun_naik,
+    CASE
+        WHEN t.vs_2022_pct >= 15             THEN 'Trend risk'
+        WHEN v.rata_gejolak_bulanan_pct >= 5 THEN 'Volatility risk'
+        ELSE 'Low risk'
+    END AS kelompok_risiko
 FROM v_volatilitas v
 JOIN v_tren_tahunan t ON t.komoditas = v.komoditas AND t.tahun = 2025
 JOIN v_efek_lebaran e ON e.komoditas = v.komoditas;
+
+-- ---------------------------------------------------------------------
+-- 9. Dimensi komoditas: label rapi + kelompok risiko
+-- ---------------------------------------------------------------------
+CREATE VIEW dim_komoditas AS
+SELECT
+    komoditas,
+    INITCAP(REPLACE(komoditas, '_', ' ')) AS nama_komoditas,   -- cabai_rawit -> Cabai Rawit
+    kelompok_risiko
+FROM v_matriks_risiko;
+
+
+-- ---------------------------------------------------------------------
+-- 10. Dimensi provinsi: kelompok pulau + label untuk peta
+-- ---------------------------------------------------------------------
+CREATE VIEW dim_provinsi AS
+SELECT
+    provinsi,
+    CASE
+        WHEN provinsi IN ('DKI Jakarta', 'Banten', 'Jawa Barat',
+                          'Jawa Tengah', 'DI Yogyakarta', 'Jawa Timur')    THEN 'Jawa'
+        WHEN provinsi IN ('Bali', 'Nusa Tenggara Barat', 'Nusa Tenggara Timur') THEN 'Bali & Nusa Tenggara'
+        WHEN provinsi LIKE 'Kalimantan%'                                    THEN 'Kalimantan'
+        WHEN provinsi LIKE 'Sulawesi%' OR provinsi = 'Gorontalo'            THEN 'Sulawesi'
+        WHEN provinsi IN ('Maluku', 'Maluku Utara', 'Papua', 'Papua Barat') THEN 'Maluku & Papua'
+        ELSE 'Sumatera'
+    END                          AS pulau,
+    provinsi || ', Indonesia'    AS lokasi_peta
+FROM (SELECT DISTINCT provinsi FROM harga_pangan) p;
+
+
+-- ---------------------------------------------------------------------
+-- 11. Dimensi tahun (tahun lengkap saja)
+-- ---------------------------------------------------------------------
+CREATE VIEW dim_tahun AS
+SELECT generate_series(2022, 2025) AS tahun;
